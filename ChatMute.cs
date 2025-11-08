@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Linq;
 using Vintagestory.API.Common;
 using Vintagestory.API.Config;
@@ -27,21 +28,27 @@ namespace ChatMute
 			
             api.Event.PlayerChat += OnPlayerChat;
 
+
             api.ChatCommands.Create("mute")
-                .WithDescription("Временно заглушить игрока в глобальном чате")
-                .WithArgs(api.ChatCommands.Parsers.Word("имя_игрока"), api.ChatCommands.Parsers.Int("минуты"))
-                .RequiresPrivilege(Privilege.ban)
+                .WithDescription(Lang.Get("globalchatmute:mute-desc"))
+                .WithArgs(
+                    api.ChatCommands.Parsers.Word(Lang.Get("globalchatmute:mute-arg-player")),
+                    api.ChatCommands.Parsers.Word(Lang.Get("globalchatmute:mute-arg-duration1")),
+                    api.ChatCommands.Parsers.OptionalWord(Lang.Get("globalchatmute:mute-arg-duration2")),
+                    api.ChatCommands.Parsers.OptionalWord(Lang.Get("globalchatmute:mute-arg-duration3"))
+                )
+                .RequiresPrivilege(Privilege.kick)
                 .HandleWith(OnMuteCommand);
 
             api.ChatCommands.Create("unmute")
-                .WithDescription("Убрать заглушение с игрока")
-                .WithArgs(api.ChatCommands.Parsers.Word("имя_игрока"))
-                .RequiresPrivilege(Privilege.ban)
+                .WithDescription(Lang.Get("globalchatmute:unmute-desc"))
+                .WithArgs(api.ChatCommands.Parsers.Word(Lang.Get("globalchatmute:unmute-arg-player")))
+                .RequiresPrivilege(Privilege.kick)
                 .HandleWith(OnUnmuteCommand);
 
             api.ChatCommands.Create("mutelist")
-                .WithDescription("Показать всех заглушенных игроков")
-                .RequiresPrivilege(Privilege.ban)
+                .WithDescription(Lang.Get("globalchatmute:mutelist-desc"))
+                .RequiresPrivilege(Privilege.kick)
                 .HandleWith(OnMuteListCommand);
 
             api.Event.Timer(CleanupExpiredMutes, 30000);
@@ -59,8 +66,8 @@ namespace ChatMute
                         consumed.value = true;
                         TimeSpan remaining = muteExpiry - DateTime.UtcNow;
                         string remainingTime = FormatTimeRemaining(remaining);
-                        byPlayer.SendMessage(GlobalConstants.GeneralChatGroup, 
-                            $"Вам запрещено писать в глобальный чат еще {remainingTime}", 
+                        byPlayer.SendMessage(GlobalConstants.GeneralChatGroup,
+                            Lang.Get("globalchatmute:mute-notify", remainingTime),
                             EnumChatType.Notification);
                         return;
                     }
@@ -75,21 +82,33 @@ namespace ChatMute
         private TextCommandResult OnMuteCommand(TextCommandCallingArgs args)
         {
             string targetPlayerName = (string)args.Parsers[0].GetValue();
-            int minutes = (int)args.Parsers[1].GetValue();
+            string duration1 = (string)args.Parsers[1].GetValue();
+            string duration2 = (string)args.Parsers[2].GetValue();
+            string duration3 = (string)args.Parsers[3].GetValue();
 
-            if (minutes <= 0)
+            // Collect all non-null duration arguments
+            List<string> durations = new List<string> { duration1 };
+            if (!string.IsNullOrWhiteSpace(duration2))
+                durations.Add(duration2);
+            if (!string.IsNullOrWhiteSpace(duration3))
+                durations.Add(duration3);
+
+            // Parse duration arguments in any order
+            int totalMinutes = ParseDurations(durations);
+            if (totalMinutes <= 0)
             {
-                return TextCommandResult.Error("Количество минут должно быть больше 0");
+                return TextCommandResult.Error(Lang.Get("globalchatmute:mute-error-duration"));
             }
 
             string targetPlayerUID = FindPlayerUID(targetPlayerName);
             if (targetPlayerUID == null)
             {
-                return TextCommandResult.Error($"Игрок '{targetPlayerName}' не найден");
+                return TextCommandResult.Error(Lang.Get("globalchatmute:mute-error-notfound", targetPlayerName));
             }
 
-            DateTime muteExpiry = DateTime.UtcNow.AddMinutes(minutes);
+            DateTime muteExpiry = DateTime.UtcNow.AddMinutes(totalMinutes);
             mutedPlayers.AddOrUpdate(targetPlayerUID, muteExpiry, (key, oldValue) => muteExpiry);
+            SaveMuteData();
 
             IServerPlayer targetPlayer = (IServerPlayer)sapi.World.AllOnlinePlayers
                 .FirstOrDefault(p => p.PlayerUID == targetPlayerUID);
@@ -97,11 +116,137 @@ namespace ChatMute
             if (targetPlayer != null)
             {
                 targetPlayer.SendMessage(GlobalConstants.GeneralChatGroup,
-                    $"Вам запрещено писать в глобальном чате на {minutes} минут",
+                    Lang.Get("globalchatmute:mute-notify-duration", FormatDurationFriendly(totalMinutes)),
                     EnumChatType.Notification);
             }
 
-            return TextCommandResult.Success($"Игрок '{targetPlayerName}' был заглушен в глобальном чате на {minutes} минут");
+            return TextCommandResult.Success(Lang.Get("globalchatmute:mute-success", targetPlayerName, FormatDurationFriendly(totalMinutes)));
+        }
+
+        private int ParseDurations(List<string> durationStrings)
+        {
+            int totalMinutes = 0;
+            const int MAX_DAYS = 365;
+            const int MAX_HOURS = 24;
+            const int MAX_MINUTES = 60;
+
+            foreach (string durationString in durationStrings)
+            {
+                if (string.IsNullOrWhiteSpace(durationString))
+                    continue;
+
+                string lower = durationString.ToLowerInvariant();
+                
+                // Extract number and unit from format like "1d", "20h", "45m"
+                int i = 0;
+                while (i < lower.Length && char.IsDigit(lower[i]))
+                    i++;
+
+                if (i == 0 || i >= lower.Length)
+                    return -1; // No digits or no unit
+
+                string numberPart = lower.Substring(0, i);
+                char unit = lower[i];
+
+                // There should be nothing after the unit
+                if (i + 1 != lower.Length)
+                    return -1; // Invalid format
+
+                if (!int.TryParse(numberPart, out int value) || value <= 0)
+                    return -1; // Invalid number
+
+                switch (unit)
+                {
+                    case 'd':
+                        if (value > MAX_DAYS)
+                            return -1;
+                        totalMinutes += value * 24 * 60;
+                        break;
+                    case 'h':
+                        if (value > MAX_HOURS)
+                            return -1;
+                        totalMinutes += value * 60;
+                        break;
+                    case 'm':
+                        if (value > MAX_MINUTES)
+                            return -1;
+                        totalMinutes += value;
+                        break;
+                    default:
+                        return -1; // Invalid unit
+                }
+            }
+
+            return totalMinutes;
+        }
+
+        private int ParseDuration(string durationString)
+        {
+            int totalMinutes = 0;
+            const int MAX_DAYS = 365;
+            const int MAX_HOURS = 24;
+            const int MAX_MINUTES = 60;
+
+            if (string.IsNullOrWhiteSpace(durationString))
+                return -1;
+
+            string lower = durationString.ToLowerInvariant();
+            int pos = 0;
+
+            while (pos < lower.Length)
+            {
+                // Find the next letter (d, h, or m)
+                int letterPos = pos;
+                while (letterPos < lower.Length && char.IsDigit(lower[letterPos]))
+                    letterPos++;
+
+                if (letterPos == pos || letterPos >= lower.Length)
+                    return -1; // No digits or no letter found
+
+                string numberPart = lower.Substring(pos, letterPos - pos);
+                char unit = lower[letterPos];
+
+                if (!int.TryParse(numberPart, out int value) || value <= 0)
+                    return -1; // Invalid number
+
+                switch (unit)
+                {
+                    case 'd':
+                        if (value > MAX_DAYS)
+                            return -1;
+                        totalMinutes += value * 24 * 60;
+                        break;
+                    case 'h':
+                        if (value > MAX_HOURS)
+                            return -1;
+                        totalMinutes += value * 60;
+                        break;
+                    case 'm':
+                        if (value > MAX_MINUTES)
+                            return -1;
+                        totalMinutes += value;
+                        break;
+                    default:
+                        return -1; // Invalid unit
+                }
+
+                pos = letterPos + 1;
+            }
+
+            return totalMinutes;
+        }
+
+        private string FormatDurationFriendly(int totalMinutes)
+        {
+            int days = totalMinutes / (24 * 60);
+            int hours = (totalMinutes % (24 * 60)) / 60;
+            int minutes = totalMinutes % 60;
+
+            if (days > 0)
+                return Lang.Get("globalchatmute:duration-days", days, hours, minutes);
+            if (hours > 0)
+                return Lang.Get("globalchatmute:duration-hours", hours, minutes);
+            return Lang.Get("globalchatmute:duration-minutes", minutes);
         }
 
         private TextCommandResult OnUnmuteCommand(TextCommandCallingArgs args)
@@ -109,9 +254,10 @@ namespace ChatMute
             string targetPlayerName = (string)args.Parsers[0].GetValue();
             string targetPlayerUID = FindPlayerUID(targetPlayerName);
 
+
             if (targetPlayerUID == null)
             {
-                return TextCommandResult.Error($"Игрок '{targetPlayerName}' не найден");
+                return TextCommandResult.Error(Lang.Get("globalchatmute:mute-error-notfound", targetPlayerName));
             }
 
             if (mutedPlayers.TryRemove(targetPlayerUID, out _))
@@ -122,21 +268,21 @@ namespace ChatMute
                 if (targetPlayer != null)
                 {
                     targetPlayer.SendMessage(GlobalConstants.GeneralChatGroup,
-                        "Вы снова можете писать в глобальном чате",
+                        Lang.Get("globalchatmute:unmute-notify"),
                         EnumChatType.Notification);
                 }
 
-                return TextCommandResult.Success($"С игрока '{targetPlayerName}' снято заглушение");
+                return TextCommandResult.Success(Lang.Get("globalchatmute:unmute-success", targetPlayerName));
             }
 
-            return TextCommandResult.Error($"Игрок '{targetPlayerName}' не заглушен");
+            return TextCommandResult.Error(Lang.Get("globalchatmute:unmute-error-notmuted", targetPlayerName));
         }
 
         private TextCommandResult OnMuteListCommand(TextCommandCallingArgs args)
         {
             if (mutedPlayers.IsEmpty)
             {
-                return TextCommandResult.Success("В данный момент никто не заглушен");
+                return TextCommandResult.Success(Lang.Get("globalchatmute:mutelist-empty"));
             }
 
             var activeMutes = mutedPlayers
@@ -145,18 +291,17 @@ namespace ChatMute
 
             if (!activeMutes.Any())
             {
-                return TextCommandResult.Success("В данный момент никто не заглушен");
+                return TextCommandResult.Success(Lang.Get("globalchatmute:mutelist-empty"));
             }
 
-            string result = $"Заглушенные игроки ({activeMutes.Count}):\n";
+            string result = Lang.Get("globalchatmute:mutelist-header", activeMutes.Count);
             foreach (var mute in activeMutes)
             {
-                string playerName = GetPlayerNameByUID(mute.Key) ?? "Неизвестен";
+                string playerName = GetPlayerNameByUID(mute.Key) ?? Lang.Get("globalchatmute:unknown-player");
                 TimeSpan remaining = mute.Value - DateTime.UtcNow;
                 string timeRemaining = FormatTimeRemaining(remaining);
-                result += $"• {playerName}: осталось {timeRemaining}\n";
+                result += Lang.Get("globalchatmute:mutelist-entry", playerName, timeRemaining);
             }
-
             return TextCommandResult.Success(result.TrimEnd('\n'));
         }
 
@@ -213,7 +358,7 @@ namespace ChatMute
             }
             catch (Exception ex)
             {
-                sapi.World.Logger.Warning($"[ChatMute] Не удалось загрузить данные заглушений: {ex.Message}");
+                sapi.World.Logger.Warning(Lang.Get("globalchatmute:mute-load-error", ex.Message));
             }
         }
 
@@ -238,7 +383,7 @@ namespace ChatMute
             }
             catch (Exception ex)
             {
-                sapi.World.Logger.Error($"[ChatMute] Не удалось сохранить данные заглушений: {ex.Message}");
+                sapi.World.Logger.Error(Lang.Get("globalchatmute:mute-save-error", ex.Message));
             }
         }
 
@@ -262,7 +407,7 @@ namespace ChatMute
             }
             catch (Exception ex)
             {
-                sapi.World.Logger.Warning($"Не удалось получить данные игрока по имени '{playerName}': {ex.Message}");
+                sapi.World.Logger.Warning(Lang.Get("globalchatmute:findplayer-error", playerName, ex.Message));
             }
 
             var offlinePlayer = sapi.World.AllPlayers
@@ -296,13 +441,13 @@ namespace ChatMute
         {
             if (timeSpan.TotalDays >= 1)
             {
-                return $"{(int)timeSpan.TotalDays}д {timeSpan.Hours}ч {timeSpan.Minutes}м";
+                return Lang.Get("globalchatmute:time-days", (int)timeSpan.TotalDays, timeSpan.Hours, timeSpan.Minutes);
             }
             if (timeSpan.TotalHours >= 1)
             {
-                return $"{timeSpan.Hours}ч {timeSpan.Minutes}м";
+                return Lang.Get("globalchatmute:time-hours", timeSpan.Hours, timeSpan.Minutes);
             }
-            return $"{timeSpan.Minutes}м {timeSpan.Seconds}с";
+            return Lang.Get("globalchatmute:time-minutes", timeSpan.Minutes, timeSpan.Seconds);
         }
 
         public override void Dispose()
