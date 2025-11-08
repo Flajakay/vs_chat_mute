@@ -1,9 +1,9 @@
 {
   "type": "code",
-  "modid": "ChatMute",
+  "modid": "globalchatmute",
   "name": "ChatMute",
   "authors": [ "Flajakay" ],
-  "description": "Server mod",
+  "description": "mute them",
   "version": "1.0.0",
   "side": "server",
   "dependencies": {
