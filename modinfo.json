@@ -5,8 +5,7 @@
   "authors": [ "Flajakay" ],
   "description": "Server mod",
   "version": "1.0.0",
-  "RequiredOnClient": "false",
-  "RequiredOnServer": "true",
+  "side": "server",
   "dependencies": {
     "game": "1.21.5"
   }
