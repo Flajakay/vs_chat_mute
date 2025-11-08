@@ -180,62 +180,6 @@ namespace ChatMute
             return totalMinutes;
         }
 
-        private int ParseDuration(string durationString)
-        {
-            int totalMinutes = 0;
-            const int MAX_DAYS = 365;
-            const int MAX_HOURS = 24;
-            const int MAX_MINUTES = 60;
-
-            if (string.IsNullOrWhiteSpace(durationString))
-                return -1;
-
-            string lower = durationString.ToLowerInvariant();
-            int pos = 0;
-
-            while (pos < lower.Length)
-            {
-                // Find the next letter (d, h, or m)
-                int letterPos = pos;
-                while (letterPos < lower.Length && char.IsDigit(lower[letterPos]))
-                    letterPos++;
-
-                if (letterPos == pos || letterPos >= lower.Length)
-                    return -1; // No digits or no letter found
-
-                string numberPart = lower.Substring(pos, letterPos - pos);
-                char unit = lower[letterPos];
-
-                if (!int.TryParse(numberPart, out int value) || value <= 0)
-                    return -1; // Invalid number
-
-                switch (unit)
-                {
-                    case 'd':
-                        if (value > MAX_DAYS)
-                            return -1;
-                        totalMinutes += value * 24 * 60;
-                        break;
-                    case 'h':
-                        if (value > MAX_HOURS)
-                            return -1;
-                        totalMinutes += value * 60;
-                        break;
-                    case 'm':
-                        if (value > MAX_MINUTES)
-                            return -1;
-                        totalMinutes += value;
-                        break;
-                    default:
-                        return -1; // Invalid unit
-                }
-
-                pos = letterPos + 1;
-            }
-
-            return totalMinutes;
-        }
-
         private string FormatDurationFriendly(int totalMinutes)
         {
             int days = totalMinutes / (24 * 60);
